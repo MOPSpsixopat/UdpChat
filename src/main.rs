@@ -4,9 +4,9 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr, UdpSocket};
 use std::str::FromStr;
 use std::sync::{Arc, Mutex};
 use std::thread;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use if_addrs::{get_if_addrs, IfAddr};
-
 use clap::Parser;
 
 #[derive(Parser, Debug)]
@@ -24,74 +24,137 @@ fn main() -> io::Result<()> {
     let local_ip = get_local_ip()?;
     let (netmask, broadcast) = get_broadcast_info(&local_ip)?;
 
+    println!("=== P2P UDP Chat ===");
     println!("Локальный IP: {}", local_ip);
     println!("Сетевая маска: {}", netmask);
     println!("Broadcast-адрес: {}", broadcast);
     println!("Порт: {}", port);
-    println!("Запущенные приложения в сети будут отображаться по мере получения сообщений.");
+    println!("Команды: 'exit' - выход, '/peers' - список участников");
+    println!("Начинайте печатать сообщения...\n");
 
     // Создание UDP сокета
     let socket = UdpSocket::bind(format!("0.0.0.0:{}", port))?;
     socket.set_broadcast(true)?;
 
     let active_peers = Arc::new(Mutex::new(HashSet::new()));
-    active_peers.lock().unwrap().insert(local_ip);
+    let should_exit = Arc::new(AtomicBool::new(false));
 
+    // Клонируем для потока получения сообщений
     let socket_clone = socket.try_clone()?;
     let active_peers_clone = Arc::clone(&active_peers);
-    let receive_handle = thread::spawn(move || receive_messages(socket_clone, active_peers_clone));
+    let should_exit_clone = Arc::clone(&should_exit);
+    let local_ip_clone = local_ip;
 
+    let receive_handle = thread::spawn(move || {
+        receive_messages(socket_clone, active_peers_clone, should_exit_clone, local_ip_clone)
+    });
+
+    // Основной цикл ввода
     let stdin = io::stdin();
     for line in stdin.lock().lines() {
         let message = line?;
-        if message.trim().is_empty() {
+        let trimmed = message.trim();
+
+        if trimmed.is_empty() {
             continue;
         }
-        if message.to_lowercase() == "exit" {
-            break;
+
+        // Обработка команд
+        match trimmed.to_lowercase().as_str() {
+            "exit" => {
+                println!("👋 Завершение работы...");
+                should_exit.store(true, Ordering::Relaxed);
+                break;
+            }
+            "/peers" => {
+                print_active_peers(&active_peers.lock().unwrap());
+                continue;
+            }
+            _ => {
+                // Обычное сообщение
+                let full_msg = format!("{}:{}", local_ip, trimmed);
+
+                // Отправка на broadcast-адрес
+                let broadcast_addr = SocketAddr::new(IpAddr::from(broadcast), port);
+                if let Err(e) = socket.send_to(full_msg.as_bytes(), broadcast_addr) {
+                    println!("Ошибка отправки: {}", e);
+                }
+            }
         }
-
-        let full_msg = format!("{}: {}", local_ip, message);
-
-        // Отправка на broadcast-адрес
-        let broadcast_addr = SocketAddr::new(IpAddr::from(broadcast), port);
-        socket.send_to(full_msg.as_bytes(), broadcast_addr)?;
-
-        print_active_peers(&active_peers.lock().unwrap(), &mut io::stdout());
     }
 
-    receive_handle.join().unwrap();
+    // Ждем завершения потока получения сообщений
+    let _ = receive_handle.join();
+    println!("Программа завершена.");
 
     Ok(())
 }
 
-fn receive_messages(socket: UdpSocket, active_peers: Arc<Mutex<HashSet<IpAddr>>>) {
+fn receive_messages(
+    socket: UdpSocket,
+    active_peers: Arc<Mutex<HashSet<IpAddr>>>,
+    should_exit: Arc<AtomicBool>,
+    local_ip: IpAddr
+) {
     let mut buf = [0; 1024];
+
+    // Устанавливаем таймаут для recv_from, чтобы проверять should_exit
+    socket.set_read_timeout(Some(std::time::Duration::from_millis(500))).ok();
+
     loop {
+        if should_exit.load(Ordering::Relaxed) {
+            break;
+        }
+
         match socket.recv_from(&mut buf) {
             Ok((len, src_addr)) => {
                 let msg = String::from_utf8_lossy(&buf[..len]);
-                if let Ok(src_ip) = IpAddr::from_str(src_addr.ip().to_string().as_str()) {
+                let src_ip = src_addr.ip();
+
+                // Добавляем IP отправителя в список активных участников
+                if let Ok(parsed_ip) = IpAddr::from_str(&src_ip.to_string()) {
                     let mut peers = active_peers.lock().unwrap();
-                    peers.insert(src_ip);
+                    peers.insert(parsed_ip);
                 }
-                println!("\n[Получено от {}]: {}", src_addr.ip(), msg.trim());
-                io::stdout().flush().unwrap();
+
+                // Парсим сообщение (формат: IP:сообщение)
+                let msg_str = msg.trim();
+                if let Some(colon_pos) = msg_str.find(':') {
+                    let (sender_ip_str, content) = msg_str.split_at(colon_pos);
+                    let content = &content[1..]; // убираем двоеточие
+
+                    // Показываем только сообщения от других участников
+                    if src_ip != local_ip {
+                        println!("💬 {}: {}", sender_ip_str, content);
+                        print!("Введите сообщение: ");
+                        io::stdout().flush().unwrap();
+                    }
+                } else {
+                    // Если формат не распознан, показываем как есть (только от других)
+                    if src_ip != local_ip {
+                        println!("[{}]: {}", src_ip, msg_str);
+                        print!("Введите сообщение: ");
+                        io::stdout().flush().unwrap();
+                    }
+                }
+            }
+            Err(ref e) if e.kind() == io::ErrorKind::TimedOut => {
+                // Таймаут - это нормально, продолжаем
+                continue;
             }
             Err(_) => {
-                // Игнорируем ошибки (например, таймауты)
+                // Другие ошибки игнорируем
             }
         }
     }
 }
 
-fn print_active_peers(active_peers: &HashSet<IpAddr>, stdout: &mut dyn Write) {
-    stdout.write_all(b"\nActive peers: ").unwrap();
-    for ip in active_peers {
-        stdout.write_fmt(format_args!("{} ", ip)).unwrap();
+fn print_active_peers(active_peers: &HashSet<IpAddr>) {
+    println!("\n=== Активные участники ({}) ===", active_peers.len());
+    for (i, ip) in active_peers.iter().enumerate() {
+        println!("   {}. {}", i + 1, ip);
     }
-    stdout.write_all(b"\n").unwrap();
-    stdout.flush().unwrap();
+    println!("==================================\n");
 }
 
 fn get_local_ip() -> io::Result<IpAddr> {
