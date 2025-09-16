@@ -1,13 +1,19 @@
-use std::collections::HashSet;
+use std::collections::{HashMap};
 use std::io::{self, BufRead, Write};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, UdpSocket};
-use std::str::FromStr;
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, Instant};
 
 use if_addrs::{get_if_addrs, IfAddr};
 use clap::Parser;
+
+#[derive(Debug, Clone)]
+struct PeerInfo {
+    ip: IpAddr,
+    last_seen: Instant,
+}
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
@@ -29,14 +35,17 @@ fn main() -> io::Result<()> {
     println!("Сетевая маска: {}", netmask);
     println!("Broadcast-адрес: {}", broadcast);
     println!("Порт: {}", port);
-    println!("Команды: 'exit' - выход, '/peers' - список участников");
+    println!("Команды: '/exit' - выход, '/peers' - список участников");
     println!("Начинайте печатать сообщения...\n");
+    print!("> ");
+    io::stdout().flush()?;
 
     // Создание UDP сокета
     let socket = UdpSocket::bind(format!("0.0.0.0:{}", port))?;
     socket.set_broadcast(true)?;
 
-    let active_peers = Arc::new(Mutex::new(HashSet::new()));
+    // Используем HashMap для отслеживания времени последней активности
+    let active_peers = Arc::new(Mutex::new(HashMap::new()));
     let should_exit = Arc::new(AtomicBool::new(false));
 
     // Клонируем для потока получения сообщений
@@ -46,7 +55,15 @@ fn main() -> io::Result<()> {
     let local_ip_clone = local_ip;
 
     let receive_handle = thread::spawn(move || {
-        receive_messages(socket_clone, active_peers_clone, should_exit_clone, local_ip_clone)
+        let _ = receive_messages(socket_clone, active_peers_clone, should_exit_clone, local_ip_clone);
+    });
+
+    // Запускаем поток для отправки heartbeat и очистки неактивных участников
+    let socket_heartbeat = socket.try_clone()?;
+    let active_peers_heartbeat = Arc::clone(&active_peers);
+    let should_exit_heartbeat = Arc::clone(&should_exit);
+    let heartbeat_handle = thread::spawn(move || {
+        heartbeat_and_cleanup(socket_heartbeat, active_peers_heartbeat, should_exit_heartbeat, broadcast, port, local_ip)
     });
 
     // Основной цикл ввода
@@ -60,31 +77,41 @@ fn main() -> io::Result<()> {
         }
 
         // Обработка команд
-        match trimmed.to_lowercase().as_str() {
-            "exit" => {
-                println!("👋 Завершение работы...");
+        match trimmed {
+            "/exit" => {
+                // Отправляем уведомление о выходе
+                let leave_msg = format!("{}:LEAVE", local_ip);
+                let broadcast_addr = SocketAddr::new(IpAddr::from(broadcast), port);
+                let _ = socket.send_to(leave_msg.as_bytes(), broadcast_addr);
+
+                println!("Завершение работы...");
                 should_exit.store(true, Ordering::Relaxed);
                 break;
             }
             "/peers" => {
-                print_active_peers(&active_peers.lock().unwrap());
+                print_active_peers(&active_peers.lock().unwrap(), local_ip);
+                print!("> ");
+                io::stdout().flush()?;
                 continue;
             }
             _ => {
                 // Обычное сообщение
-                let full_msg = format!("{}:{}", local_ip, trimmed);
+                let full_msg = format!("{}:CHAT:{}", local_ip, trimmed);
 
                 // Отправка на broadcast-адрес
                 let broadcast_addr = SocketAddr::new(IpAddr::from(broadcast), port);
                 if let Err(e) = socket.send_to(full_msg.as_bytes(), broadcast_addr) {
                     println!("Ошибка отправки: {}", e);
                 }
+                print!("> ");
+                io::stdout().flush()?;
             }
         }
     }
 
-    // Ждем завершения потока получения сообщений
+    // Ждем завершения потоков
     let _ = receive_handle.join();
+    let _ = heartbeat_handle.join();
     println!("Программа завершена.");
 
     Ok(())
@@ -92,14 +119,14 @@ fn main() -> io::Result<()> {
 
 fn receive_messages(
     socket: UdpSocket,
-    active_peers: Arc<Mutex<HashSet<IpAddr>>>,
+    active_peers: Arc<Mutex<HashMap<IpAddr, PeerInfo>>>,
     should_exit: Arc<AtomicBool>,
     local_ip: IpAddr
-) {
+) -> io::Result<()> {
     let mut buf = [0; 1024];
 
     // Устанавливаем таймаут для recv_from, чтобы проверять should_exit
-    socket.set_read_timeout(Some(std::time::Duration::from_millis(500))).ok();
+    socket.set_read_timeout(Some(Duration::from_millis(500))).ok();
 
     loop {
         if should_exit.load(Ordering::Relaxed) {
@@ -111,35 +138,54 @@ fn receive_messages(
                 let msg = String::from_utf8_lossy(&buf[..len]);
                 let src_ip = src_addr.ip();
 
-                // Добавляем IP отправителя в список активных участников
-                if let Ok(parsed_ip) = IpAddr::from_str(&src_ip.to_string()) {
-                    let mut peers = active_peers.lock().unwrap();
-                    peers.insert(parsed_ip);
+                // Игнорируем свои сообщения
+                if src_ip == local_ip {
+                    continue;
                 }
 
-                // Парсим сообщение (формат: IP:сообщение)
                 let msg_str = msg.trim();
-                if let Some(colon_pos) = msg_str.find(':') {
-                    let (sender_ip_str, content) = msg_str.split_at(colon_pos);
-                    let content = &content[1..]; // убираем двоеточие
 
-                    // Показываем только сообщения от других участников
-                    if src_ip != local_ip {
-                        println!("💬 {}: {}", sender_ip_str, content);
-                        print!("Введите сообщение: ");
-                        io::stdout().flush().unwrap();
-                    }
-                } else {
-                    // Если формат не распознан, показываем как есть (только от других)
-                    if src_ip != local_ip {
-                        println!("[{}]: {}", src_ip, msg_str);
-                        print!("Введите сообщение: ");
-                        io::stdout().flush().unwrap();
+                let parts: Vec<&str> = msg_str.splitn(3, ':').collect();
+                if parts.len() >= 2 {
+                    let sender_ip_str = parts[0];
+                    let msg_type = parts[1];
+
+                    match msg_type {
+                        "CHAT" => {
+                            if parts.len() >= 3 {
+                                let content = parts[2];
+                                // Обновляем информацию об участнике
+                                update_peer_activity(&active_peers, src_ip);
+
+                                println!("\r{}: {}", sender_ip_str, content);
+                                print!("> ");
+                                let _ = io::stdout().flush();
+                            }
+                        }
+                        "LEAVE" => {
+                            // Удаляем участника из списка
+                            let mut peers = active_peers.lock().unwrap();
+                            peers.remove(&src_ip);
+                            println!("\r{} покинул чат", sender_ip_str);
+                            print_active_peers(&peers, local_ip);
+                            print!("> ");
+                            let _ = io::stdout().flush();
+                        }
+                        "HEARTBEAT" => {
+                            // Обновляем информацию об участнике
+                            update_peer_activity(&active_peers, src_ip);
+                        }
+                        _ => {
+                            // Неизвестный тип сообщения, обрабатываем как обычное
+                            update_peer_activity(&active_peers, src_ip);
+                            println!("\r[{}]: {}", src_ip, msg_str);
+                            print!("> ");
+                            let _ = io::stdout().flush();
+                        }
                     }
                 }
             }
             Err(ref e) if e.kind() == io::ErrorKind::TimedOut => {
-                // Таймаут - это нормально, продолжаем
                 continue;
             }
             Err(_) => {
@@ -147,14 +193,69 @@ fn receive_messages(
             }
         }
     }
+    Ok(())
 }
 
-fn print_active_peers(active_peers: &HashSet<IpAddr>) {
-    println!("\n=== Активные участники ({}) ===", active_peers.len());
-    for (i, ip) in active_peers.iter().enumerate() {
-        println!("   {}. {}", i + 1, ip);
+fn update_peer_activity(active_peers: &Arc<Mutex<HashMap<IpAddr, PeerInfo>>>, ip: IpAddr) {
+    let mut peers = active_peers.lock().unwrap();
+    peers.insert(ip, PeerInfo {
+        ip,
+        last_seen: Instant::now(),
+    });
+}
+
+fn heartbeat_and_cleanup(
+    socket: UdpSocket,
+    active_peers: Arc<Mutex<HashMap<IpAddr, PeerInfo>>>,
+    should_exit: Arc<AtomicBool>,
+    broadcast: Ipv4Addr,
+    port: u16,
+    local_ip: IpAddr
+) {
+    let broadcast_addr = SocketAddr::new(IpAddr::from(broadcast), port);
+
+    loop {
+        if should_exit.load(Ordering::Relaxed) {
+            break;
+        }
+
+        thread::sleep(Duration::from_secs(5));
+
+        // Отправляем heartbeat
+        let heartbeat_msg = format!("{}:HEARTBEAT", local_ip);
+        let _ = socket.send_to(heartbeat_msg.as_bytes(), broadcast_addr);
+
+        // Очищаем неактивных участников (не получали сообщений более 30 секунд)
+        let mut peers = active_peers.lock().unwrap();
+        let now = Instant::now();
+        let initial_count = peers.len();
+
+        peers.retain(|_, peer_info| {
+            now.duration_since(peer_info.last_seen) < Duration::from_secs(30)
+        });
+
+        // Если кто-то исчез, показываем обновленный список
+        if peers.len() < initial_count && !should_exit.load(Ordering::Relaxed) {
+            drop(peers); // Освобождаем мьютекс
+            let peers = active_peers.lock().unwrap();
+            print!("\r");
+            print_active_peers(&peers, local_ip);
+            print!("> ");
+            let _ = io::stdout().flush();
+        }
     }
-    println!("==================================\n");
+}
+
+fn print_active_peers(active_peers: &HashMap<IpAddr, PeerInfo>, local_ip: IpAddr) {
+    println!("\n=== Активные участники ({}) ===", active_peers.len());
+    for (i, peer_info) in active_peers.values().enumerate() {
+        if peer_info.ip == local_ip {
+            println!("   {}. {} (You)", i + 1, peer_info.ip);
+        } else {
+            println!("   {}. {}", i + 1, peer_info.ip);
+        }
+    }
+    println!("=================================\n");
 }
 
 fn get_local_ip() -> io::Result<IpAddr> {
