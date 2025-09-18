@@ -26,18 +26,18 @@ fn main() -> io::Result<()> {
     };
     let (netmask, broadcast) = get_broadcast_info(&local_ip)?;
 
-    let mut multicast_addr = if let Some(ip_str) = multicast_ip_str {
+    let multicast_addr = Arc::new(Mutex::new(if let Some(ip_str) = multicast_ip_str {
         let multi_ip = parse_multicast_ip(&ip_str)?;
         Some(SocketAddr::new(IpAddr::V4(multi_ip), port))
     } else {
         None
-    };
+    }));
 
     println!("=== P2P UDP Chat ===");
     println!("Local IP: {}", local_ip);
     println!("Subnet mask: {}", netmask);
     println!("Broadcast-address: {}", broadcast);
-    if let Some(addr) = &multicast_addr {
+    if let Some(addr) = *multicast_addr.lock().unwrap() {
         println!("Multicast-address: {}", addr);
     }
     println!("Port: {}", port);
@@ -48,9 +48,9 @@ fn main() -> io::Result<()> {
 
     let socket = UdpSocket::bind(format!("0.0.0.0:{}", port))?;
     socket.set_broadcast(true)?;
-    socket.set_multicast_loop_v4(false)?; // Отключаем multicast loop для изоляции
+    socket.set_multicast_loop_v4(false)?; // Отключаем loop для изоляции
 
-    if let Some(multi_addr) = &multicast_addr {
+    if let Some(multi_addr) = *multicast_addr.lock().unwrap() {
         if let IpAddr::V4(multi_ip) = multi_addr.ip() {
             socket.join_multicast_v4(&multi_ip, &local_ipv4)?;
             println!("Joined multicast group: {}", multi_ip);
@@ -64,23 +64,24 @@ fn main() -> io::Result<()> {
     let active_peers_clone = Arc::clone(&active_peers);
     let should_exit_clone = Arc::clone(&should_exit);
     let local_ip_clone = local_ip;
-    let multicast_addr_clone = multicast_addr;
+    let multicast_addr_clone = Arc::clone(&multicast_addr);
 
     let receive_handle = thread::spawn(move || {
-        let _ = receive_messages(socket_clone, active_peers_clone, should_exit_clone, local_ip_clone, multicast_addr_clone);
+        let _ = receive_messages(socket_clone, active_peers_clone, should_exit_clone, local_ip_clone, &multicast_addr_clone);
     });
 
     let socket_heartbeat = socket.try_clone()?;
     let active_peers_heartbeat = Arc::clone(&active_peers);
     let should_exit_heartbeat = Arc::clone(&should_exit);
+    let multicast_addr_heartbeat = Arc::clone(&multicast_addr);
     let heartbeat_handle = thread::spawn(move || {
-        heartbeat_and_cleanup(socket_heartbeat, active_peers_heartbeat, should_exit_heartbeat, broadcast, port, local_ip, multicast_addr)
+        heartbeat_and_cleanup(socket_heartbeat, active_peers_heartbeat, should_exit_heartbeat, broadcast, port, local_ip, &multicast_addr_heartbeat);
     });
 
     let socket_input = socket.try_clone()?;
-    handle_input(socket_input, active_peers, should_exit, broadcast, port, local_ip, &mut multicast_addr, local_ipv4)?;
+    handle_input(socket_input, active_peers, should_exit, broadcast, port, local_ip, &multicast_addr, local_ipv4)?;
 
-    if let Some(multi_addr) = multicast_addr {
+    if let Some(multi_addr) = *multicast_addr.lock().unwrap() {
         if let IpAddr::V4(multi_ip) = multi_addr.ip() {
             let _ = socket.leave_multicast_v4(&multi_ip, &local_ipv4);
         }

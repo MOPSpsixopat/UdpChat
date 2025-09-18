@@ -14,7 +14,7 @@ pub fn receive_messages(
     active_peers: Arc<Mutex<ActivePeers>>,
     should_exit: Arc<AtomicBool>,
     local_ip: IpAddr,
-    multicast_addr: Option<SocketAddr>
+    multicast_addr: &Arc<Mutex<Option<SocketAddr>>>
 ) -> io::Result<()> {
     let mut buf = [0; 1024];
 
@@ -29,56 +29,41 @@ pub fn receive_messages(
             Ok((len, src_addr)) => {
                 let src_ip = src_addr.ip();
 
-                // Игнорируем свои сообщения
                 if src_ip == local_ip {
                     continue;
                 }
 
-                // В multicast-режиме принимаем сообщения с текущего multicast-адреса или broadcast
-                let is_multicast_mode = multicast_addr.is_some();
-                if is_multicast_mode {
-                    if let Some(multi_addr) = multicast_addr {
-                        let is_multicast_src = match src_ip {
-                            IpAddr::V4(ipv4) => ipv4.octets()[0] >= 224 && ipv4.octets()[0] <= 239,
-                            _ => false,
-                        };
-                        let is_broadcast_src = match src_ip {
-                            IpAddr::V4(ipv4) => ipv4.is_broadcast() || ipv4 == Ipv4Addr::new(192, 168, 122, 255), // Адаптируй под свою подсеть
-                            _ => false,
-                        };
-                        if !is_multicast_src && !is_broadcast_src {
-                            continue; // Игнорируем сообщения, не с multicast или broadcast
-                        }
-                        if is_multicast_src && src_ip != multi_addr.ip() {
-                            continue; // Игнорируем сообщения с другого multicast-адреса
-                        }
-                    }
-                }
-                // В broadcast-режиме принимаем все сообщения
-
                 let msg = String::from_utf8_lossy(&buf[..len]);
                 let msg_str = msg.trim();
 
-                let parts: Vec<&str> = msg_str.splitn(3, ':').collect();
-                if parts.len() >= 2 {
+                let parts: Vec<&str> = msg_str.splitn(4, ':').collect();
+                if parts.len() >= 4 {
                     let sender_ip_str = parts[0];
                     let msg_type = parts[1];
+                    let transport_type = parts[2];
+
+                    let is_multicast_mode = multicast_addr.lock().unwrap().is_some();
+                    let is_multicast_transport = transport_type == "MULTICAST";
+
+                    if is_multicast_transport && !is_multicast_mode {
+                        continue; // Игнорируем multicast-сообщения в broadcast-режиме
+                    }
 
                     match msg_type {
                         "CHAT" => {
-                            if parts.len() >= 3 {
-                                let content = parts[2];
-                                update_peer_activity(&active_peers, src_ip);
+                            let content = parts[3];
+                            update_peer_activity(&active_peers, src_ip);
 
-                                println!("\r{}: {}", sender_ip_str, content);
-                                print!("> ");
-                                let _ = io::stdout().flush();
-                            }
+                            let mode_label = if transport_type == "MULTICAST" { "[M]" } else { "[B]" };
+                            println!("\r{} {}: {}", mode_label, sender_ip_str, content);
+                            print!("> ");
+                            let _ = io::stdout().flush();
                         }
                         "LEAVE" => {
                             let mut peers = active_peers.lock().unwrap();
                             peers.remove(&src_ip);
-                            println!("\r{} leave chat", sender_ip_str);
+                            let mode_label = if transport_type == "MULTICAST" { "[M]" } else { "[B]" };
+                            println!("\r{} {} left chat", mode_label, sender_ip_str);
                             print_active_peers(&peers, local_ip);
                             print!("> ");
                             let _ = io::stdout().flush();
@@ -88,9 +73,46 @@ pub fn receive_messages(
                         }
                         _ => {
                             update_peer_activity(&active_peers, src_ip);
-                            println!("\r[{}]: {}", src_ip, msg_str);
+                            let mode_label = if transport_type == "MULTICAST" { "[M]" } else { "[B]" };
+                            println!("\r{} [{}]: {}", mode_label, src_ip, msg_str);
                             print!("> ");
                             let _ = io::stdout().flush();
+                        }
+                    }
+                } else {
+                    // Обработка старого формата (без transport_type) - считаем broadcast
+                    let parts: Vec<&str> = msg_str.splitn(3, ':').collect();
+                    if parts.len() >= 2 {
+                        let sender_ip_str = parts[0];
+                        let msg_type = parts[1];
+
+                        match msg_type {
+                            "CHAT" => {
+                                if parts.len() >= 3 {
+                                    let content = parts[2];
+                                    update_peer_activity(&active_peers, src_ip);
+                                    println!("\r[B] {}: {}", sender_ip_str, content);
+                                    print!("> ");
+                                    let _ = io::stdout().flush();
+                                }
+                            }
+                            "LEAVE" => {
+                                let mut peers = active_peers.lock().unwrap();
+                                peers.remove(&src_ip);
+                                println!("\r[B] {} left chat", sender_ip_str);
+                                print_active_peers(&peers, local_ip);
+                                print!("> ");
+                                let _ = io::stdout().flush();
+                            }
+                            "HEARTBEAT" => {
+                                update_peer_activity(&active_peers, src_ip);
+                            }
+                            _ => {
+                                update_peer_activity(&active_peers, src_ip);
+                                println!("\r[B] [{}]: {}", src_ip, msg_str);
+                                print!("> ");
+                                let _ = io::stdout().flush();
+                            }
                         }
                     }
                 }
@@ -113,10 +135,9 @@ pub fn heartbeat_and_cleanup(
     broadcast: Ipv4Addr,
     port: u16,
     local_ip: IpAddr,
-    multicast_addr: Option<SocketAddr>
+    multicast_addr: &Arc<Mutex<Option<SocketAddr>>>
 ) {
     let broadcast_addr = SocketAddr::new(IpAddr::V4(broadcast), port);
-    let target_addr = multicast_addr.unwrap_or(broadcast_addr);
 
     loop {
         if should_exit.load(Ordering::Relaxed) {
@@ -125,7 +146,16 @@ pub fn heartbeat_and_cleanup(
 
         thread::sleep(Duration::from_secs(5));
 
-        let heartbeat_msg = format!("{}:HEARTBEAT", local_ip);
+        let (target_addr, transport_type) = {
+            let multicast_guard = multicast_addr.lock().unwrap();
+            if let Some(multi_addr) = *multicast_guard {
+                (multi_addr, "MULTICAST")
+            } else {
+                (broadcast_addr, "BROADCAST")
+            }
+        };
+
+        let heartbeat_msg = format!("{}:HEARTBEAT:{}", local_ip, transport_type);
         let _ = socket.send_to(heartbeat_msg.as_bytes(), &target_addr);
 
         let mut peers = active_peers.lock().unwrap();
@@ -159,10 +189,10 @@ pub fn handle_input(
     broadcast: Ipv4Addr,
     port: u16,
     local_ip: IpAddr,
-    multicast_addr: &mut Option<SocketAddr>,
+    multicast_addr: &Arc<Mutex<Option<SocketAddr>>>,
     local_ipv4: Ipv4Addr
 ) -> io::Result<()> {
-    let mut is_multicast = multicast_addr.is_some();
+    let mut is_multicast = multicast_addr.lock().unwrap().is_some();
     let broadcast_addr = SocketAddr::new(IpAddr::V4(broadcast), port);
 
     let stdin = io::stdin();
@@ -176,9 +206,16 @@ pub fn handle_input(
 
         match trimmed {
             "/exit" => {
-                let target_addr = multicast_addr.as_ref().unwrap_or(&broadcast_addr);
-                let leave_msg = format!("{}:LEAVE", local_ip);
-                let _ = socket.send_to(leave_msg.as_bytes(), target_addr);
+                let (target_addr, transport_type) = {
+                    let multicast_guard = multicast_addr.lock().unwrap();
+                    if let Some(multi_addr) = *multicast_guard {
+                        (multi_addr, "MULTICAST")
+                    } else {
+                        (broadcast_addr, "BROADCAST")
+                    }
+                };
+                let leave_msg = format!("{}:LEAVE:{}", local_ip, transport_type);
+                let _ = socket.send_to(leave_msg.as_bytes(), &target_addr);
 
                 println!("Shutdown...");
                 should_exit.store(true, Ordering::Relaxed);
@@ -208,9 +245,20 @@ pub fn handle_input(
                         if let Err(e) = socket.join_multicast_v4(&multi_ip, &local_ipv4) {
                             println!("Failed to join multicast: {}", e);
                         } else {
-                            *multicast_addr = Some(multi_addr);
+                            let mut multicast_guard = multicast_addr.lock().unwrap();
+                            *multicast_guard = Some(multi_addr);
                             is_multicast = true;
-                            println!("Joined multicast group: {}", multi_ip);
+                            println!("Joined multicast group: {} (you will only see multicast messages now)", multi_ip);
+
+                            // Очищаем список активных участников при переключении режима
+                            {
+                                let mut peers = active_peers.lock().unwrap();
+                                peers.clear();
+                                peers.insert(local_ip, crate::peer::PeerInfo {
+                                    ip: local_ip,
+                                    last_seen: Instant::now(),
+                                });
+                            }
                         }
                     }
                     Err(e) => {
@@ -222,13 +270,24 @@ pub fn handle_input(
                 continue;
             }
             "/leave_multicast" => {
-                if let Some(multi_addr) = multicast_addr.take() {
+                let mut multicast_guard = multicast_addr.lock().unwrap();
+                if let Some(multi_addr) = multicast_guard.take() {
                     if let IpAddr::V4(multi_ip) = multi_addr.ip() {
                         if let Err(e) = socket.leave_multicast_v4(&multi_ip, &local_ipv4) {
                             println!("Failed to leave multicast: {}", e);
                         } else {
                             is_multicast = false;
-                            println!("Left multicast group: {}", multi_ip);
+                            println!("Left multicast group: {} (switched to broadcast mode)", multi_ip);
+
+                            // Очищаем список активных участников при переключении режима
+                            {
+                                let mut peers = active_peers.lock().unwrap();
+                                peers.clear();
+                                peers.insert(local_ip, crate::peer::PeerInfo {
+                                    ip: local_ip,
+                                    last_seen: Instant::now(),
+                                });
+                            }
                         }
                     }
                 } else {
@@ -239,10 +298,17 @@ pub fn handle_input(
                 continue;
             }
             _ => {
-                let target_addr = multicast_addr.as_ref().unwrap_or(&broadcast_addr);
-                let full_msg = format!("{}:CHAT:{}", local_ip, trimmed);
+                let (target_addr, transport_type) = {
+                    let multicast_guard = multicast_addr.lock().unwrap();
+                    if let Some(multi_addr) = *multicast_guard {
+                        (multi_addr, "MULTICAST")
+                    } else {
+                        (broadcast_addr, "BROADCAST")
+                    }
+                };
+                let full_msg = format!("{}:CHAT:{}:{}", local_ip, transport_type, trimmed);
 
-                if let Err(e) = socket.send_to(full_msg.as_bytes(), target_addr) {
+                if let Err(e) = socket.send_to(full_msg.as_bytes(), &target_addr) {
                     println!("Sending error: {}", e);
                 }
                 print!("> ");
