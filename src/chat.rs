@@ -29,7 +29,6 @@ pub fn receive_messages(
             Ok((len, src_addr)) => {
                 let src_ip = src_addr.ip();
 
-                // Игнорируем свои сообщения
                 if src_ip == local_ip {
                     continue;
                 }
@@ -37,39 +36,29 @@ pub fn receive_messages(
                 let msg = String::from_utf8_lossy(&buf[..len]);
                 let msg_str = msg.trim();
 
-                // Отладочная информация
-                let is_multicast_mode = multicast_addr.is_some();
-                if is_multicast_mode { "MULTICAST" } else { "BROADCAST" };
-
                 let parts: Vec<&str> = msg_str.splitn(4, ':').collect();
-                if parts.len() >= 3 {
+                if parts.len() >= 4 {
                     let sender_ip_str = parts[0];
                     let msg_type = parts[1];
-                    let transport_type = parts[2]; // "MULTICAST" или "BROADCAST"
+                    let transport_type = parts[2];
 
-                    // Фильтрация сообщений на основе режима работы
+                    // Фильтрация на основе режима получателя и transport_type отправителя
                     let is_multicast_mode = multicast_addr.is_some();
+                    let is_multicast_transport = transport_type == "MULTICAST";
 
-                    // СТРОГАЯ фильтрация: показываем только сообщения своего типа
-                    if is_multicast_mode && transport_type != "MULTICAST" {
-                        continue; // В multicast режиме игнорируем всё кроме MULTICAST
-                    }
-
-                    if !is_multicast_mode && transport_type != "BROADCAST" {
-                        continue; // В broadcast режиме игнорируем всё кроме BROADCAST
+                    if is_multicast_transport && !is_multicast_mode {
+                        continue; // Игнорируем multicast-сообщения в broadcast-режиме
                     }
 
                     match msg_type {
                         "CHAT" => {
-                            if parts.len() >= 4 {
-                                let content = parts[3];
-                                update_peer_activity(&active_peers, src_ip);
+                            let content = parts[3];
+                            update_peer_activity(&active_peers, src_ip);
 
-                                let mode_label = if transport_type == "MULTICAST" { "[M]" } else { "[B]" };
-                                println!("\r{} {}: {}", mode_label, sender_ip_str, content);
-                                print!("> ");
-                                let _ = io::stdout().flush();
-                            }
+                            let mode_label = if transport_type == "MULTICAST" { "[M]" } else { "[B]" };
+                            println!("\r{} {}: {}", mode_label, sender_ip_str, content);
+                            print!("> ");
+                            let _ = io::stdout().flush();
                         }
                         "LEAVE" => {
                             let mut peers = active_peers.lock().unwrap();
@@ -81,7 +70,6 @@ pub fn receive_messages(
                             let _ = io::stdout().flush();
                         }
                         "HEARTBEAT" => {
-                            // Обновляем активность только если сообщение из нашего режима
                             update_peer_activity(&active_peers, src_ip);
                         }
                         _ => {
@@ -93,12 +81,7 @@ pub fn receive_messages(
                         }
                     }
                 } else {
-                    // Обработка старого формата сообщений (без transport_type)
-                    // Считаем их broadcast сообщениями для совместимости
-                    if multicast_addr.is_some() {
-                        continue; // В multicast режиме игнорируем старые сообщения
-                    }
-
+                    // Обработка старого формата (без transport_type) - считаем broadcast
                     let parts: Vec<&str> = msg_str.splitn(3, ':').collect();
                     if parts.len() >= 2 {
                         let sender_ip_str = parts[0];
@@ -233,30 +216,7 @@ pub fn handle_input(
                 break;
             }
             "/peers" => {
-                let peers = active_peers.lock().unwrap();
-                let mode = if is_multicast { "Multicast" } else { "Broadcast" };
-                println!("\n=== Активные участники {} ({}) ===", mode, peers.len());
-                let mut sorted_peers: Vec<_> = peers.values().collect();
-                sorted_peers.sort_by_key(|peer| peer.ip);
-                for (i, peer_info) in sorted_peers.iter().enumerate() {
-                    if peer_info.ip == local_ip {
-                        println!("   {}. {} (You)", i + 1, peer_info.ip);
-                    } else {
-                        println!("   {}. {}", i + 1, peer_info.ip);
-                    }
-                }
-                println!("==============================\n");
-                print!("> ");
-                io::stdout().flush()?;
-                continue;
-            }
-            "/mode" => {
-                let mode = if is_multicast {
-                    format!("Multicast ({})", multicast_addr.as_ref().unwrap().ip())
-                } else {
-                    "Broadcast".to_string()
-                };
-                println!("Current mode: {}", mode);
+                print_active_peers(&active_peers.lock().unwrap(), local_ip);
                 print!("> ");
                 io::stdout().flush()?;
                 continue;

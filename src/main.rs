@@ -39,24 +39,16 @@ fn main() -> io::Result<()> {
     println!("Broadcast-address: {}", broadcast);
     if let Some(addr) = &multicast_addr {
         println!("Multicast-address: {}", addr);
-        println!("Mode: Multicast (you will only see multicast messages)");
-    } else {
-        println!("Mode: Broadcast (you will only see broadcast messages)");
     }
     println!("Port: {}", port);
-    println!("Commands:");
-    println!("  '/exit' - выход");
-    println!("  '/peers' - список участников");
-    println!("  '/mode' - текущий режим работы");
-    println!("  '/join_multicast <IP>' - присоединиться к multicast");
-    println!("  '/leave_multicast' - выйти из multicast");
+    println!("Commands: '/exit' - выход, '/peers' - список участников, '/join_multicast <IP>' - присоединиться к multicast, '/leave_multicast' - выйти из multicast");
     println!("Write a message...\n");
     print!("> ");
     io::stdout().flush()?;
 
     let socket = UdpSocket::bind(format!("0.0.0.0:{}", port))?;
     socket.set_broadcast(true)?;
-    socket.set_multicast_loop_v4(false)?; // Отключаем multicast loop для изоляции
+    socket.set_multicast_loop_v4(false)?; // Отключаем loop для изоляции
 
     if let Some(multi_addr) = &multicast_addr {
         if let IpAddr::V4(multi_ip) = multi_addr.ip() {
