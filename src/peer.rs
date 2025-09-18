@@ -30,7 +30,7 @@ pub fn print_active_peers(active_peers: &HashMap<IpAddr, PeerInfo>, local_ip: Ip
             println!("   {}. {}", i + 1, peer_info.ip);
         }
     }
-    println!("=================================\n");
+    println!("==============================\n");
 }
 
 pub fn new_active_peers(local_ip: IpAddr) -> ActivePeers {

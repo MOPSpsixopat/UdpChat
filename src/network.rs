@@ -42,3 +42,19 @@ pub fn calculate_broadcast(ip: &Ipv4Addr, netmask: Ipv4Addr) -> Ipv4Addr {
     ];
     Ipv4Addr::from(broadcast_bytes)
 }
+
+pub fn parse_multicast_ip(ip_str: &str) -> io::Result<Ipv4Addr> {
+    let ip: IpAddr = ip_str
+        .parse()
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, format!("Failed to parse IP: {}", e)))?;
+    if let IpAddr::V4(ipv4) = ip {
+        // Проверка, что это multicast (224.0.0.0/4)
+        if ipv4.octets()[0] >= 224 && ipv4.octets()[0] <= 239 {
+            Ok(ipv4)
+        } else {
+            Err(io::Error::new(io::ErrorKind::InvalidInput, "Not a valid multicast IP"))
+        }
+    } else {
+        Err(io::Error::new(io::ErrorKind::InvalidInput, "Multicast IP must be IPv4"))
+    }
+}
