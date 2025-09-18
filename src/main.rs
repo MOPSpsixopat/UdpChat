@@ -45,6 +45,14 @@ fn main() -> io::Result<()> {
     let active_peers = Arc::new(Mutex::new(HashMap::new()));
     let should_exit = Arc::new(AtomicBool::new(false));
 
+    {
+        let mut peers = active_peers.lock().unwrap();
+        peers.insert(local_ip, PeerInfo {
+            ip: local_ip,
+            last_seen: Instant::now(),
+        });
+    }
+
     let socket_clone = socket.try_clone()?;
     let active_peers_clone = Arc::clone(&active_peers);
     let should_exit_clone = Arc::clone(&should_exit);
@@ -215,8 +223,13 @@ fn heartbeat_and_cleanup(
             now.duration_since(peer_info.last_seen) < Duration::from_secs(60)
         });
 
+        peers.entry(local_ip).or_insert(PeerInfo {
+            ip: local_ip,
+            last_seen: Instant::now(),
+        });
+
         if peers.len() < initial_count && !should_exit.load(Ordering::Relaxed) {
-            drop(peers); // Освобождаем мьютекс
+            drop(peers);
             let peers = active_peers.lock().unwrap();
             print!("\r");
             print_active_peers(&peers, local_ip);
@@ -227,8 +240,10 @@ fn heartbeat_and_cleanup(
 }
 
 fn print_active_peers(active_peers: &HashMap<IpAddr, PeerInfo>, local_ip: IpAddr) {
-    println!("\n=== Active members ({}) ===", active_peers.len());
-    for (i, peer_info) in active_peers.values().enumerate() {
+    println!("\n=== Активные участники ({}) ===", active_peers.len());
+    let mut sorted_peers: Vec<_> = active_peers.values().collect();
+    sorted_peers.sort_by_key(|peer| peer.ip);
+    for (i, peer_info) in sorted_peers.iter().enumerate() {
         if peer_info.ip == local_ip {
             println!("   {}. {} (You)", i + 1, peer_info.ip);
         } else {
