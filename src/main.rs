@@ -48,8 +48,8 @@ fn main() -> io::Result<()> {
     println!("  '/exit' - выход");
     println!("  '/peers' - список участников");
     println!("  '/mode' - текущий режим работы");
-    println!("  '/join <IP>' - присоединиться к multicast");
-    println!("  '/leave' - выйти из multicast");
+    println!("  '/join_multicast <IP>' - присоединиться к multicast");
+    println!("  '/leave_multicast' - выйти из multicast");
     println!("Write a message...\n");
     print!("> ");
     io::stdout().flush()?;

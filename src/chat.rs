@@ -37,6 +37,10 @@ pub fn receive_messages(
                 let msg = String::from_utf8_lossy(&buf[..len]);
                 let msg_str = msg.trim();
 
+                // Отладочная информация
+                let is_multicast_mode = multicast_addr.is_some();
+                if is_multicast_mode { "MULTICAST" } else { "BROADCAST" };
+
                 let parts: Vec<&str> = msg_str.splitn(4, ':').collect();
                 if parts.len() >= 3 {
                     let sender_ip_str = parts[0];
@@ -46,14 +50,13 @@ pub fn receive_messages(
                     // Фильтрация сообщений на основе режима работы
                     let is_multicast_mode = multicast_addr.is_some();
 
-                    // Если мы в broadcast режиме, игнорируем multicast сообщения
-                    if !is_multicast_mode && transport_type == "MULTICAST" {
-                        continue;
+                    // СТРОГАЯ фильтрация: показываем только сообщения своего типа
+                    if is_multicast_mode && transport_type != "MULTICAST" {
+                        continue; // В multicast режиме игнорируем всё кроме MULTICAST
                     }
 
-                    // Если мы в multicast режиме, игнорируем broadcast сообщения
-                    if is_multicast_mode && transport_type == "BROADCAST" {
-                        continue;
+                    if !is_multicast_mode && transport_type != "BROADCAST" {
+                        continue; // В broadcast режиме игнорируем всё кроме BROADCAST
                     }
 
                     match msg_type {
@@ -258,7 +261,7 @@ pub fn handle_input(
                 io::stdout().flush()?;
                 continue;
             }
-            "/join" => {
+            "/join_multicast" => {
                 if is_multicast {
                     println!("Already in multicast group.");
                 } else {
@@ -299,7 +302,7 @@ pub fn handle_input(
                 io::stdout().flush()?;
                 continue;
             }
-            "/leave" => {
+            "/leave_multicast" => {
                 if let Some(multi_addr) = multicast_addr.take() {
                     if let IpAddr::V4(multi_ip) = multi_addr.ip() {
                         if let Err(e) = socket.leave_multicast_v4(&multi_ip, &local_ipv4) {
