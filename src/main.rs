@@ -39,16 +39,24 @@ fn main() -> io::Result<()> {
     println!("Broadcast-address: {}", broadcast);
     if let Some(addr) = &multicast_addr {
         println!("Multicast-address: {}", addr);
+        println!("Mode: Multicast (you will only see multicast messages)");
+    } else {
+        println!("Mode: Broadcast (you will only see broadcast messages)");
     }
     println!("Port: {}", port);
-    println!("Commands: '/exit' - выход, '/peers' - список участников, '/join_multicast <IP>' - присоединиться к multicast, '/leave_multicast' - выйти из multicast");
+    println!("Commands:");
+    println!("  '/exit' - выход");
+    println!("  '/peers' - список участников");
+    println!("  '/mode' - текущий режим работы");
+    println!("  '/join <IP>' - присоединиться к multicast");
+    println!("  '/leave' - выйти из multicast");
     println!("Write a message...\n");
     print!("> ");
     io::stdout().flush()?;
 
     let socket = UdpSocket::bind(format!("0.0.0.0:{}", port))?;
     socket.set_broadcast(true)?;
-    socket.set_multicast_loop_v4(true)?;
+    socket.set_multicast_loop_v4(false)?; // Отключаем multicast loop для изоляции
 
     if let Some(multi_addr) = &multicast_addr {
         if let IpAddr::V4(multi_ip) = multi_addr.ip() {
@@ -64,7 +72,7 @@ fn main() -> io::Result<()> {
     let active_peers_clone = Arc::clone(&active_peers);
     let should_exit_clone = Arc::clone(&should_exit);
     let local_ip_clone = local_ip;
-    let multicast_addr_clone = multicast_addr; // Клонируем для потока
+    let multicast_addr_clone = multicast_addr;
 
     let receive_handle = thread::spawn(move || {
         let _ = receive_messages(socket_clone, active_peers_clone, should_exit_clone, local_ip_clone, multicast_addr_clone);
