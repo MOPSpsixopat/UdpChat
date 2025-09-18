@@ -48,7 +48,7 @@ fn main() -> io::Result<()> {
 
     let socket = UdpSocket::bind(format!("0.0.0.0:{}", port))?;
     socket.set_broadcast(true)?;
-    socket.set_multicast_loop_v4(false)?; // Отключаем loop для изоляции
+    socket.set_multicast_loop_v4(false)?; // Отключаем multicast loop для изоляции
 
     if let Some(multi_addr) = &multicast_addr {
         if let IpAddr::V4(multi_ip) = multi_addr.ip() {
