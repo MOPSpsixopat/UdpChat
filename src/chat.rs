@@ -13,7 +13,8 @@ pub fn receive_messages(
     socket: UdpSocket,
     active_peers: Arc<Mutex<ActivePeers>>,
     should_exit: Arc<AtomicBool>,
-    local_ip: IpAddr
+    local_ip: IpAddr,
+    multicast_addr: Option<SocketAddr>
 ) -> io::Result<()> {
     let mut buf = [0; 1024];
 
@@ -26,13 +27,29 @@ pub fn receive_messages(
 
         match socket.recv_from(&mut buf) {
             Ok((len, src_addr)) => {
-                let msg = String::from_utf8_lossy(&buf[..len]);
                 let src_ip = src_addr.ip();
+                
+                let is_multicast_mode = multicast_addr.is_some();
+                let is_multicast_src = match src_ip {
+                    IpAddr::V4(ipv4) => ipv4.octets()[0] >= 224 && ipv4.octets()[0] <= 239,
+                    _ => false,
+                };
+                
+                if is_multicast_mode {
+                    if let Some(multi_addr) = multicast_addr {
+                        if src_ip != multi_addr.ip() {
+                            continue;
+                        }
+                    }
+                } else if is_multicast_src {
+                    continue;
+                }
 
                 if src_ip == local_ip {
                     continue;
                 }
 
+                let msg = String::from_utf8_lossy(&buf[..len]);
                 let msg_str = msg.trim();
 
                 let parts: Vec<&str> = msg_str.splitn(3, ':').collect();
@@ -75,7 +92,7 @@ pub fn receive_messages(
                 continue;
             }
             Err(_) => {
-                //ignore another errors
+                // Игнорируем другие ошибки
             }
         }
     }
@@ -118,7 +135,7 @@ pub fn heartbeat_and_cleanup(
         });
 
         if peers.len() < initial_count && !should_exit.load(Ordering::Relaxed) {
-            drop(peers);
+            drop(peers); // Освобождаем мьютекс
             let peers = active_peers.lock().unwrap();
             print!("\r");
             print_active_peers(&peers, local_ip);

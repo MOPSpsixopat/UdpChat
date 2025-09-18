@@ -48,6 +48,7 @@ fn main() -> io::Result<()> {
 
     let socket = UdpSocket::bind(format!("0.0.0.0:{}", port))?;
     socket.set_broadcast(true)?;
+    socket.set_multicast_loop_v4(true)?;
 
     if let Some(multi_addr) = &multicast_addr {
         if let IpAddr::V4(multi_ip) = multi_addr.ip() {
@@ -63,9 +64,10 @@ fn main() -> io::Result<()> {
     let active_peers_clone = Arc::clone(&active_peers);
     let should_exit_clone = Arc::clone(&should_exit);
     let local_ip_clone = local_ip;
+    let multicast_addr_clone = multicast_addr; // Клонируем для потока
 
     let receive_handle = thread::spawn(move || {
-        let _ = receive_messages(socket_clone, active_peers_clone, should_exit_clone, local_ip_clone);
+        let _ = receive_messages(socket_clone, active_peers_clone, should_exit_clone, local_ip_clone, multicast_addr_clone);
     });
 
     let socket_heartbeat = socket.try_clone()?;
