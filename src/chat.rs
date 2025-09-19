@@ -22,6 +22,14 @@ fn get_target_and_transport(
     }
 }
 
+fn reset_peers(active_peers: &Arc<Mutex<ActivePeers>>, local_ip: IpAddr) {
+    let mut peers = active_peers.lock().unwrap();
+    peers.clear();
+    peers.insert(local_ip, crate::peer::PeerInfo {
+        last_seen: Instant::now(),
+    });
+}
+
 pub fn receive_messages(
     socket: UdpSocket,
     active_peers: Arc<Mutex<ActivePeers>>,
@@ -47,7 +55,6 @@ pub fn receive_messages(
                     continue;
                 }
 
-                // Проверяем, игнорируется ли отправитель
                 if ignored_peers.lock().unwrap().contains(&src_ip) {
                     continue;
                 }
@@ -178,7 +185,6 @@ pub fn heartbeat_and_cleanup(
         });
 
         peers.entry(local_ip).or_insert(crate::peer::PeerInfo {
-            ip: local_ip,
             last_seen: Instant::now(),
         });
 
@@ -255,14 +261,7 @@ pub fn handle_input(
                             is_multicast = true;
                             println!("Joined multicast group: {} (you will only see multicast messages now)", multi_ip);
 
-                            {
-                                let mut peers = active_peers.lock().unwrap();
-                                peers.clear();
-                                peers.insert(local_ip, crate::peer::PeerInfo {
-                                    ip: local_ip,
-                                    last_seen: Instant::now(),
-                                });
-                            }
+                            reset_peers(&active_peers, local_ip);
                         }
                     }
                     Err(e) => {
@@ -283,14 +282,7 @@ pub fn handle_input(
                             is_multicast = false;
                             println!("Left multicast group: {} (switched to broadcast mode)", multi_ip);
 
-                            {
-                                let mut peers = active_peers.lock().unwrap();
-                                peers.clear();
-                                peers.insert(local_ip, crate::peer::PeerInfo {
-                                    ip: local_ip,
-                                    last_seen: Instant::now(),
-                                });
-                            }
+                            reset_peers(&active_peers, local_ip);
                         }
                     }
                 } else {

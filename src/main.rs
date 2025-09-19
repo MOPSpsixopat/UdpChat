@@ -44,14 +44,14 @@ fn main() -> io::Result<()> {
         println!("Multicast-address: {}", addr);
     }
     println!("Port: {}", port);
-    println!("Commands: '/exit' - выход, '/peers' - список участников, '/join_multicast <IP>' - присоединиться к multicast, '/leave_multicast' - выйти из multicast, '/ignore <IP>' - игнорировать хост, '/unignore <IP>' - перестать игнорировать");
+    println!("Commands: '/exit', '/peers' - list members, '/join_multicast <IP>' - join to multicast, '/leave_multicast' - leave from multicast, '/ignore <IP>' - ignore host, '/unignore <IP>' - unignore host");
     println!("Write a message...\n");
     print!("> ");
     io::stdout().flush()?;
 
     let socket = UdpSocket::bind(format!("0.0.0.0:{}", port))?;
     socket.set_broadcast(true)?;
-    socket.set_multicast_loop_v4(false)?; // Отключаем loop для изоляции
+    socket.set_multicast_loop_v4(false)?; 
 
     if let Some(multi_addr) = *multicast_addr.lock().unwrap() {
         if let IpAddr::V4(multi_ip) = multi_addr.ip() {

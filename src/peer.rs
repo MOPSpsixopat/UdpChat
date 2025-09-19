@@ -8,15 +8,12 @@ pub type ActivePeers = HashMap<IpAddr, PeerInfo>;
 
 #[derive(Debug)]
 pub struct PeerInfo {
-    #[allow(dead_code)]
-    pub ip: IpAddr,
     pub last_seen: Instant,
 }
 
 pub fn new_active_peers(local_ip: IpAddr) -> ActivePeers {
     let mut peers = HashMap::new();
     peers.insert(local_ip, PeerInfo {
-        ip: local_ip,
         last_seen: Instant::now(),
     });
     peers
@@ -27,7 +24,6 @@ pub fn update_peer_activity(peers: &Arc<Mutex<ActivePeers>>, ip: IpAddr) {
     peers.entry(ip).and_modify(|e| {
         e.last_seen = Instant::now();
     }).or_insert(PeerInfo {
-        ip,
         last_seen: Instant::now(),
     });
 }

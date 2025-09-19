@@ -48,7 +48,6 @@ pub fn parse_multicast_ip(ip_str: &str) -> io::Result<Ipv4Addr> {
         .parse()
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, format!("Failed to parse IP: {}", e)))?;
     if let IpAddr::V4(ipv4) = ip {
-        // Проверка, что это multicast (224.0.0.0/4)
         if ipv4.octets()[0] >= 224 && ipv4.octets()[0] <= 239 {
             Ok(ipv4)
         } else {
