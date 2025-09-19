@@ -1,36 +1,16 @@
 use std::collections::HashMap;
 use std::net::IpAddr;
-use std::sync::{Arc, Mutex};
 use std::time::Instant;
-
-#[derive(Debug, Clone)]
-pub struct PeerInfo {
-    pub ip: IpAddr,
-    pub last_seen: Instant,
-}
+use std::sync::{Arc, Mutex};
+use std::collections::HashSet;
 
 pub type ActivePeers = HashMap<IpAddr, PeerInfo>;
 
-pub fn update_peer_activity(active_peers: &Arc<Mutex<ActivePeers>>, ip: IpAddr) {
-    let mut peers = active_peers.lock().unwrap();
-    peers.insert(ip, PeerInfo {
-        ip,
-        last_seen: Instant::now(),
-    });
-}
-
-pub fn print_active_peers(active_peers: &HashMap<IpAddr, PeerInfo>, local_ip: IpAddr) {
-    println!("\n=== Активные участники ({}) ===", active_peers.len());
-    let mut sorted_peers: Vec<_> = active_peers.values().collect();
-    sorted_peers.sort_by_key(|peer| peer.ip);
-    for (i, peer_info) in sorted_peers.iter().enumerate() {
-        if peer_info.ip == local_ip {
-            println!("   {}. {} (You)", i + 1, peer_info.ip);
-        } else {
-            println!("   {}. {}", i + 1, peer_info.ip);
-        }
-    }
-    println!("==============================\n");
+#[derive(Debug)]
+pub struct PeerInfo {
+    #[allow(dead_code)]
+    pub ip: IpAddr,
+    pub last_seen: Instant,
 }
 
 pub fn new_active_peers(local_ip: IpAddr) -> ActivePeers {
@@ -40,4 +20,30 @@ pub fn new_active_peers(local_ip: IpAddr) -> ActivePeers {
         last_seen: Instant::now(),
     });
     peers
+}
+
+pub fn update_peer_activity(peers: &Arc<Mutex<ActivePeers>>, ip: IpAddr) {
+    let mut peers = peers.lock().unwrap();
+    peers.entry(ip).and_modify(|e| {
+        e.last_seen = Instant::now();
+    }).or_insert(PeerInfo {
+        ip,
+        last_seen: Instant::now(),
+    });
+}
+
+pub fn print_active_peers(peers: &ActivePeers, local_ip: IpAddr, ignored_peers: &Arc<Mutex<HashSet<IpAddr>>>) {
+    let ignored = ignored_peers.lock().unwrap();
+    println!("\n=== Активные участники ({}) ===", peers.len());
+    for (i, (ip, _)) in peers.iter().enumerate() {
+        let mut label = String::new();
+        if *ip == local_ip {
+            label.push_str(" (You)");
+        }
+        if ignored.contains(ip) {
+            label.push_str(" [Muted]");
+        }
+        println!("   {}. {}{}", i + 1, ip, label);
+    }
+    println!("==============================");
 }

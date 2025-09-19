@@ -3,6 +3,7 @@ use std::net::{IpAddr, SocketAddr, UdpSocket};
 use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicBool};
 use std::thread;
+use std::collections::HashSet;
 
 use chat::{handle_input, heartbeat_and_cleanup, receive_messages};
 use network::{get_broadcast_info, get_local_ip, parse_multicast_ip};
@@ -33,6 +34,8 @@ fn main() -> io::Result<()> {
         None
     }));
 
+    let ignored_peers = Arc::new(Mutex::new(HashSet::new()));
+
     println!("=== P2P UDP Chat ===");
     println!("Local IP: {}", local_ip);
     println!("Subnet mask: {}", netmask);
@@ -41,7 +44,7 @@ fn main() -> io::Result<()> {
         println!("Multicast-address: {}", addr);
     }
     println!("Port: {}", port);
-    println!("Commands: '/exit' - выход, '/peers' - список участников, '/join_multicast <IP>' - присоединиться к multicast, '/leave_multicast' - выйти из multicast");
+    println!("Commands: '/exit' - выход, '/peers' - список участников, '/join_multicast <IP>' - присоединиться к multicast, '/leave_multicast' - выйти из multicast, '/ignore <IP>' - игнорировать хост, '/unignore <IP>' - перестать игнорировать");
     println!("Write a message...\n");
     print!("> ");
     io::stdout().flush()?;
@@ -65,9 +68,10 @@ fn main() -> io::Result<()> {
     let should_exit_clone = Arc::clone(&should_exit);
     let local_ip_clone = local_ip;
     let multicast_addr_clone = Arc::clone(&multicast_addr);
+    let ignored_peers_clone = Arc::clone(&ignored_peers);
 
     let receive_handle = thread::spawn(move || {
-        let _ = receive_messages(socket_clone, active_peers_clone, should_exit_clone, local_ip_clone, &multicast_addr_clone);
+        let _ = receive_messages(socket_clone, active_peers_clone, should_exit_clone, local_ip_clone, &multicast_addr_clone, &ignored_peers_clone);
     });
 
     let socket_heartbeat = socket.try_clone()?;
@@ -79,7 +83,7 @@ fn main() -> io::Result<()> {
     });
 
     let socket_input = socket.try_clone()?;
-    handle_input(socket_input, active_peers, should_exit, broadcast, port, local_ip, &multicast_addr, local_ipv4)?;
+    handle_input(socket_input, active_peers, should_exit, broadcast, port, local_ip, &multicast_addr, local_ipv4, &ignored_peers)?;
 
     if let Some(multi_addr) = *multicast_addr.lock().unwrap() {
         if let IpAddr::V4(multi_ip) = multi_addr.ip() {
